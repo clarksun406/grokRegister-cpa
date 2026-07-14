@@ -34,6 +34,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+# 强制 UTF-8 输出避免 Windows GBK 无法渲染 emoji 导致崩溃
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from curl_cffi import requests
 
 CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"

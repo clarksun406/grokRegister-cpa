@@ -18,6 +18,10 @@ import queue
 import secrets
 import struct
 import random
+
+# 强制 UTF-8 输出避免 Windows GBK 无法渲染 emoji 导致崩溃
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 import re
 import string
 import json
@@ -67,6 +71,7 @@ DEFAULT_CONFIG = {
 
 config = DEFAULT_CONFIG.copy()
 _cf_domain_index = 0
+_yyds_domain_index = 0
 
 
 class RegistrationCancelled(Exception):
@@ -372,6 +377,9 @@ def create_browser_options():
     options.set_timeouts(base=1)
     if os.path.exists(EXTENSION_PATH):
         options.add_extension(EXTENSION_PATH)
+    proxy = config.get("proxy", "")
+    if proxy:
+        options.set_proxy(proxy)
     return options
 
 
@@ -392,7 +400,7 @@ def http_get(url, **kwargs):
     except Exception as exc:
         err = str(exc)
         # 代理不可用时自动回退为直连，避免整个流程直接失败
-        if "127.0.0.1 port 7890" in err or "Could not connect to server" in err:
+        if "127.0.0.1 port 7890" in err or "Could not connect to server" in err or "timed out" in err:
             retry_kwargs = dict(kwargs)
             retry_kwargs["proxies"] = {}
             return requests.get(url, **_build_request_kwargs(**retry_kwargs))
@@ -404,7 +412,7 @@ def http_post(url, **kwargs):
         return requests.post(url, **_build_request_kwargs(**kwargs))
     except Exception as exc:
         err = str(exc)
-        if "127.0.0.1 port 7890" in err or "Could not connect to server" in err:
+        if "127.0.0.1 port 7890" in err or "Could not connect to server" in err or "timed out" in err:
             retry_kwargs = dict(kwargs)
             retry_kwargs["proxies"] = {}
             return requests.post(url, **_build_request_kwargs(**retry_kwargs))
@@ -668,16 +676,30 @@ def yyds_pick_domain(api_key=None, jwt=None):
     domains = yyds_get_domains(api_key=api_key, jwt=jwt)
     if not domains:
         raise Exception("YYDS 没有返回任何可用域名")
-    private = [d for d in domains if d.get("isVerified") and not d.get("isPublic")]
-    if private:
-        return private[0]["domain"]
-    public = [d for d in domains if d.get("isVerified") and d.get("isPublic")]
-    if public:
-        return public[0]["domain"]
-    verified = [d for d in domains if d.get("isVerified")]
-    if verified:
-        return verified[0]["domain"]
-    raise Exception("YYDS 无已验证域名可用")
+    # 过滤掉已知被 x.ai 拉黑的域名后缀
+    blocked_suffixes = ("hzeg.eu.org", "dpdns.org")
+    filtered = [d for d in domains if not d["domain"].endswith(blocked_suffixes)]
+    if not filtered:
+        filtered = domains  # 如果全被过滤了就全部用
+    # 优先选不太像垃圾邮件的域名（非 eu.org、非纯数字 + 公共后缀）
+    def score(d):
+        dom = d["domain"]
+        s = 0
+        if dom.endswith((".xyz", ".cc", ".cc.cd", ".com", ".net", ".top", ".vip", ".info")):
+            s += 10
+        if dom.endswith((".eu.org", ".eu.cc", ".dpdns.org", ".qzz.io", ".de5.net")):
+            s -= 5
+        if dom.startswith(("yyds", "mail", "email")):
+            s -= 3
+        parts = dom.split(".")
+        if len(parts) >= 3 and len(parts[-2]) > 4:
+            s += 3
+        return s
+    filtered.sort(key=score, reverse=True)
+    global _yyds_domain_index
+    idx = _yyds_domain_index % len(filtered)
+    _yyds_domain_index += 1
+    return filtered[idx]["domain"]
 
 
 def yyds_get_email_and_token(api_key=None, jwt=None):
@@ -1557,6 +1579,21 @@ def open_signup_page(log_callback=None, cancel_callback=None):
     sleep_with_cancel(2, cancel_callback)
     if log_callback:
         log_callback(f"[*] 当前URL: {page.url}")
+    # 关闭 Cookie 弹窗，否则会挡住注册按钮
+    try:
+        page.run_js(r"""
+const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+for (const btn of buttons) {
+    const text = (btn.innerText || btn.textContent || '').trim();
+    if (text.includes('全部拒绝') || text.includes('Reject all') || text.includes('Deny')) {
+        if (!btn.disabled) { btn.click(); return true; }
+    }
+}
+return false;
+        """)
+        sleep_with_cancel(1, cancel_callback)
+    except Exception:
+        pass
     click_email_signup_button(
         log_callback=log_callback, cancel_callback=cancel_callback
     )
@@ -1641,7 +1678,7 @@ return false;
         return False
 
 
-def _wait_email_page_advanced(email, wait=4.0, cancel_callback=None):
+def _wait_email_page_advanced(email, wait=10.0, cancel_callback=None):
     """点击提交后，在有限窗口内轮询确认页面确实前进。
 
     给页面/网络一点反应时间：若窗口内检测到已前进则返回 True，
@@ -1826,6 +1863,10 @@ return candidates[0].text || true;
             sleep_with_cancel(0.5, cancel_callback)
             continue
         sleep_with_cancel(0.8, cancel_callback)
+        try:
+            getTurnstileToken(log_callback=log_callback, cancel_callback=cancel_callback)
+        except Exception:
+            pass
         clicked = page.run_js(
             r"""
 function isVisible(node) {
@@ -1909,6 +1950,40 @@ return 'enter';
                     detail = f" ({clicked})" if isinstance(clicked, str) else ""
                     log_callback(f"[*] 已填写邮箱并提交: {email}{detail}")
                 return email, dev_token
+            # 检查页面是否显示了域名被拒的错误信息
+            try:
+                page_error = page.run_js(r'''
+const visible = [];
+document.querySelectorAll('div, span, p, label').forEach(el => {
+    const s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return;
+    const t = (el.innerText || el.textContent || '').trim();
+    if (t && t.length > 5 && t.length < 200) visible.push(t);
+});
+const unique = [...new Set(visible)];
+// 精确匹配"电子邮件地址 xxx 已被拒绝"模式
+const err = unique.find(t =>
+    t.includes('已被拒绝') && (t.includes('@') || t.includes('电子邮件'))
+);
+if (err) return err.slice(0, 200);
+// 也匹配英文模式
+const errEn = unique.find(t => {
+    const lower = t.toLowerCase();
+    return (lower.includes('email') || lower.includes('@')) &&
+        (lower.includes('not support') || lower.includes('not allow') || lower.includes('not accept') ||
+         lower.includes('invalid') || lower.includes('blocked') || lower.includes('reject'));
+});
+return errEn ? errEn.slice(0, 200) : null;
+''')
+                if page_error:
+                    if log_callback:
+                        log_callback(f"[!] x.ai 拒绝此邮箱域名: {page_error}")
+                    raise AccountRetryNeeded(f"邮箱域名被 x.ai 拒绝: {page_error}")
+            except AccountRetryNeeded:
+                raise
+            except Exception as js_err:
+                if log_callback:
+                    log_callback(f"[Debug] 检查页面错误信息异常: {js_err}")
             if log_callback and time.time() - last_diag_time >= 5:
                 last_diag_time = time.time()
                 log_callback(f"[Debug] 已点击注册但页面未前进，重试提交: {email}")
