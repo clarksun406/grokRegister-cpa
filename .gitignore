@@ -25,6 +25,9 @@ auth_merged.json
 sso_list.txt
 token.json
 
+# CPA OAuth 凭证文件
+cpa_auth/
+
 *.log
 .DS_Store
 .idea/
