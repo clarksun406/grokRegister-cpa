@@ -37,7 +37,17 @@ import sso_to_auth_json as _s2cpa
 
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+ACCOUNTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts")
 MEMORY_CLEANUP_INTERVAL = 5
+
+
+def get_accounts_dir():
+    """返回注册账号保存目录（项目根目录下的 accounts/），不存在则创建。"""
+    try:
+        os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+    except Exception:
+        pass
+    return ACCOUNTS_DIR
 
 UI_BG = "#242424"
 UI_PANEL_BG = "#2b2b2b"
@@ -308,7 +318,7 @@ def _resolve_cpa_proxy():
     return "http://127.0.0.1:7890"
 
 
-def add_sso_to_cpa(raw_token, email="", log_callback=None):
+def add_sso_to_cpa(raw_token, email="", password="", log_callback=None, tab=None):
     """SSO → 授权码流程换 token → 写入本地 CPA auth 目录和/或远程 CPA。
 
     SSO 本身不是 CPA 认的凭据；必须先用授权码流程（referrer=grok-build）
@@ -317,6 +327,7 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None):
 
     - 本地：写入 cpa_auth_dir，CPA 监听热加载
     - 远程：POST Management API /v0/management/auth-files（cpa_remote_url + cpa_management_key）
+    - tab：可选的 DrissionPage ChromiumTab，用于浏览器 consent 流程（绕过 Cloudflare）
     """
     if not config.get("cpa_auto_add", False):
         return
@@ -344,7 +355,14 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None):
 
     try:
         _cpa_log(f"SSO → 授权码流程换 token (proxy={proxy}) ...")
-        token = _s2cpa.sso_to_token(sso, proxy=proxy, log=_cpa_log)
+        token = None
+        if tab:
+            _cpa_log("复用注册浏览器提交 consent ...")
+            token = _s2cpa.sso_to_token_browser(sso, tab=tab, proxy=proxy, log=_cpa_log)
+            if not token:
+                _cpa_log("浏览器 consent 失败，回退纯 HTTP 授权码流程 ...")
+        if not token:
+            token = _s2cpa.sso_to_token(sso, proxy=proxy, log=_cpa_log)
         if not token:
             _cpa_log("授权码流程换 token 失败，跳过")
             return
@@ -374,10 +392,12 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None):
 def create_browser_options():
     options = ChromiumOptions()
     options.auto_port()
+    options.set_argument("--disable-blink-features=AutomationControlled")
+    options.set_argument("--window-size=1920,1080")
     options.set_timeouts(base=1)
     if os.path.exists(EXTENSION_PATH):
         options.add_extension(EXTENSION_PATH)
-    proxy = config.get("proxy", "")
+    proxy = str(config.get("proxy", "") or "").strip()
     if proxy:
         options.set_proxy(proxy)
     return options
@@ -676,30 +696,30 @@ def yyds_pick_domain(api_key=None, jwt=None):
     domains = yyds_get_domains(api_key=api_key, jwt=jwt)
     if not domains:
         raise Exception("YYDS 没有返回任何可用域名")
-    # 过滤掉已知被 x.ai 拉黑的域名后缀
-    blocked_suffixes = ("hzeg.eu.org", "dpdns.org")
-    filtered = [d for d in domains if not d["domain"].endswith(blocked_suffixes)]
+    # 白名单：历史 accounts_*.txt 里成功过的域名，x.ai 已验证可注册。
+    # YYDS 全列表里有大量乱七八糟子域（bbroot.com/abrdns.com 等）会被提交接口
+    # 直接 403，故只从这几个里轮换，不沿用打分轮换。
+    whitelist = ("215.singledog.net", "91.txvlogvip.top", "a.bdbdjx.top")
+    available = {d["domain"] for d in domains}
+    filtered = [d for d in whitelist if d in available]
     if not filtered:
-        filtered = domains  # 如果全被过滤了就全部用
-    # 优先选不太像垃圾邮件的域名（非 eu.org、非纯数字 + 公共后缀）
-    def score(d):
-        dom = d["domain"]
-        s = 0
-        if dom.endswith((".xyz", ".cc", ".cc.cd", ".com", ".net", ".top", ".vip", ".info")):
-            s += 10
-        if dom.endswith((".eu.org", ".eu.cc", ".dpdns.org", ".qzz.io", ".de5.net")):
-            s -= 5
-        if dom.startswith(("yyds", "mail", "email")):
-            s -= 3
-        parts = dom.split(".")
-        if len(parts) >= 3 and len(parts[-2]) > 4:
-            s += 3
-        return s
-    filtered.sort(key=score, reverse=True)
+        # 白名单域名当前不可用，回退到打分轮换（兜底，别让流程卡死）
+        blocked_suffixes = ("hzeg.eu.org", "dpdns.org")
+        fallback = [d for d in domains if not d["domain"].endswith(blocked_suffixes)] or domains
+        def score(d):
+            dom = d["domain"]; s = 0
+            if dom.endswith((".xyz", ".cc", ".cc.cd", ".com", ".net", ".top", ".vip", ".info")): s += 10
+            if dom.endswith((".eu.org", ".eu.cc", ".dpdns.org", ".qzz.io", ".de5.net")): s -= 5
+            if dom.startswith(("yyds", "mail", "email")): s -= 3
+            parts = dom.split(".")
+            if len(parts) >= 3 and len(parts[-2]) > 4: s += 3
+            return s
+        fallback.sort(key=score, reverse=True)
+        filtered = [d["domain"] for d in fallback]
     global _yyds_domain_index
     idx = _yyds_domain_index % len(filtered)
     _yyds_domain_index += 1
-    return filtered[idx]["domain"]
+    return filtered[idx]
 
 
 def yyds_get_email_and_token(api_key=None, jwt=None):
@@ -2893,7 +2913,7 @@ class GrokRegisterGUI:
         self.results = []
         now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.accounts_output_file = os.path.join(
-            os.path.dirname(__file__), f"accounts_{now}.txt"
+            get_accounts_dir(), f"accounts_{now}.txt"
         )
         self.update_stats()
         self._set_running_ui(True)
@@ -2994,7 +3014,7 @@ class GrokRegisterGUI:
                             f.write(line)
                     except Exception as file_exc:
                         self.log(f"[Debug] 保存账号文件失败: {file_exc}")
-                    add_sso_to_cpa(sso, email=email, log_callback=self.log)
+                    add_sso_to_cpa(sso, email=email, password=profile.get("password",""), log_callback=self.log, tab=page)
                     self.success_count += 1
                     retry_count_for_slot = 0
                     i += 1
@@ -3098,7 +3118,7 @@ def run_registration_cli(count):
     retry_count_for_slot = 0
     max_slot_retry = 3
     accounts_output_file = os.path.join(
-        os.path.dirname(__file__),
+        get_accounts_dir(),
         f"accounts_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
     )
     cli_log(f"[*] 终端模式启动，目标数量: {count}")
@@ -3184,7 +3204,7 @@ def run_registration_cli(count):
                         f.write(line)
                 except Exception as file_exc:
                     cli_log(f"[Debug] 保存账号文件失败: {file_exc}")
-                add_sso_to_cpa(sso, email=email, log_callback=cli_log)
+                add_sso_to_cpa(sso, email=email, password=profile.get("password",""), log_callback=cli_log, tab=page)
                 success_count += 1
                 retry_count_for_slot = 0
                 i += 1

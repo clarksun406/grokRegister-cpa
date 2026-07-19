@@ -27,6 +27,7 @@ token.json
 
 # CPA OAuth 凭证文件
 cpa_auth/
+cpa_auth_403/
 
 *.log
 .DS_Store
@@ -34,3 +35,24 @@ cpa_auth/
 .vscode/
 DrissionPage/
 autoPortData/
+
+accounts/
+
+# 临时账号文件（含明文密码+sso），禁止提交
+_tmp_new_accounts.json
+_tmp_*.json
+
+# Claude Code / 工具本地配置
+reasonix.toml
+
+# 调试/废弃脚本（保留本地，不入库）
+debug_playwright.py
+test_click.py
+test_browser_cpa.py
+test_consent*.py
+convert_cpa_playwright.py
+sso_to_token_browser.py
+batch_convert_cpa.py
+manual_convert_cpa.py
+cpa2sub2api/
+

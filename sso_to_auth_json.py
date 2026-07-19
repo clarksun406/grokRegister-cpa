@@ -144,6 +144,15 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
     authorize 注入 referrer=grok-build + plan=generic，
     consent 提交 referrer 置空。proxy 非空时全程走代理。
     """
+    # 与旧版保持兼容：如果不传 proxy，尝试从 config 读取
+    if not proxy:
+        try:
+            import json as _json
+            with open(os.path.join(os.path.dirname(__file__), "config.json"), encoding="utf-8") as _f:
+                _cfg = _json.load(_f)
+                proxy = _cfg.get("proxy", "")
+        except Exception:
+            pass
     proxies = {"http": proxy, "https": proxy} if proxy else None
     s = requests.Session()
     if proxies:
@@ -291,7 +300,246 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
         + (" + refresh_token" if token.get("refresh_token") else "")
     )
     return token
+def sso_to_token_browser(
+    sso_cookie: str, tab=None, proxy: str = "", log=print, headless: bool = True
+) -> dict | None:
+    """SSO cookie → token dict，consent 步骤用浏览器（绕过 Cloudflare）。
 
+    策略：
+    1. 在浏览器的已登录 session 中设置 sso/sso-rw cookie
+    2. 浏览器导航到 authorize URL，进入 consent 页面
+    3. 在浏览器中用 fetch 发送 Next.js Server Action 提交 consent（而非点击按钮）
+    4. 解析响应获取 authorization code
+    5. 用 curl_cffi 交换 code → access/refresh token
+    """
+    import re as _re
+    import urllib.parse as _up
+    import json as _json
+
+    if not proxy:
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "config.json"), encoding="utf-8") as _f:
+                _cfg = _json.load(_f)
+                proxy = _cfg.get("proxy", "")
+        except Exception:
+            pass
+
+    verifier, challenge, state, nonce = _gen_pkce()
+
+    authorize_params = _up.urlencode({
+        "client_id": CLIENT_ID,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "nonce": nonce,
+        "plan": GROK_PLAN,
+        "redirect_uri": REDIRECT_URI,
+        "referrer": GROK_REFERRER,
+        "response_type": "code",
+        "scope": SCOPES,
+        "state": state,
+    })
+
+    auth_url = f"{OIDC_ISSUER}/oauth2/authorize?{authorize_params}"
+
+    # ------ 浏览器部分（consent） ------
+    _own_browser = False
+    _browser = None
+    _the_tab = tab
+    if _the_tab is None:
+        try:
+            from DrissionPage import Chromium as _Chromium
+            from DrissionPage import ChromiumOptions as _ChromiumOptions
+            _co = _ChromiumOptions()
+            _co.auto_port()
+            _co.headless(headless)
+            _co.set_timeouts(base=1)
+            if proxy:
+                _co.set_proxy(proxy)
+            _browser = _Chromium(_co)
+            _the_tab = _browser.new_tab()
+            _own_browser = True
+        except Exception as e:
+            log(f"  ❌ 无法创建浏览器: {e}")
+            return None
+
+    try:
+        import time as _time
+        # 设置 SSO cookie
+        _the_tab.get("https://accounts.x.ai/")
+        _the_tab.wait(1)
+        for _domain in ["accounts.x.ai", "auth.x.ai"]:
+            _the_tab._run_cdp("Network.setCookie", name="sso", value=sso_cookie,
+                domain=_domain, path="/", secure=True, httpOnly=False, sameSite="Lax")
+            _the_tab._run_cdp("Network.setCookie", name="sso-rw", value=sso_cookie,
+                domain=_domain, path="/", secure=True, httpOnly=False, sameSite="Lax")
+
+        # 导航到 authorize URL → 自动重定向到 consent 页面
+        _the_tab.get(auth_url)
+        _final_url = _the_tab.url
+        # DrissionPage 的 get() 在代理较慢时可能停在 authorize URL 就返回；
+        # 轮询等待服务端完成到 accounts.x.ai/consent（固定 sleep 3s 不可靠）。
+        for _ in range(15):
+            if "/oauth2/consent" in _final_url or "sign-in" in _final_url or "sign-up" in _final_url:
+                break
+            _the_tab.wait(1)
+            _final_url = _the_tab.url
+        log(f"  [浏览器] URL: {_final_url[:80]}")
+
+        if "sign-in" in _final_url or "sign-up" in _final_url:
+            log("  ❌ 跳转到登录页，SSO cookie 无效")
+            if _own_browser and _browser:
+                try: _browser.quit()
+                except: pass
+            return None
+
+        if "/oauth2/consent" not in _final_url:
+            log(f"  ❌ 未进入 consent 页面: {_final_url}")
+            if _own_browser and _browser:
+                try: _browser.quit()
+                except: pass
+            return None
+
+        # 构建 Next.js Server Action 的 JSON 请求体
+        _consent_payload = [_json.dumps([{
+            "action": "allow",
+            "clientId": CLIENT_ID,
+            "redirectUri": REDIRECT_URI,
+            "scope": SCOPES,
+            "state": state,
+            "codeChallenge": challenge,
+            "codeChallengeMethod": "S256",
+            "nonce": nonce,
+            "principalType": "User",
+            "principalId": "",
+            "referrer": GROK_REFERRER,
+        }])]
+
+        # 在浏览器中执行 fetch（有 Cloudflare cookie，不会被拦）
+        _result = _the_tab.run_js(f'''
+            fetch('{_final_url}', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'Accept': 'text/x-component',
+                    'Next-Action': '{NEXT_ACTION_ID}',
+                    'Origin': 'https://accounts.x.ai',
+                }},
+                body: '{_consent_payload[0].replace("'", "\\'")}',
+                redirect: 'manual'
+            }})
+            .then(r => {{
+                console.log('Consent status:', r.status);
+                return r.text();
+            }})
+            .then(text => text)
+            .catch(err => 'Error: ' + err.toString());
+        ''')
+
+        # Next.js Server Action 通常直接在响应体返回 authorization code，
+        # 页面不一定跳转。旧逻辑丢掉了这个结果，只等 URL 变化，导致成功也超时。
+        _code = _parse_consent_code(str(_result or "")) or ""
+
+        # 等待重定向
+        if not _code:
+            for _ in range(15):
+                _the_tab.wait(1)
+                _current = _the_tab.url
+                log(f"  [浏览器] URL: {_current[:80]}")
+                if "code=" in _current or "localhost" in _current:
+                    break
+
+        # 从最终 URL 提取 code
+        _final_url = _the_tab.url
+        log(f"  [浏览器] 最终 URL: {_final_url[:100]}")
+
+        if _code:
+            log("  ✅ 浏览器授权完成，已从 consent 响应获取 authorization code")
+        elif "localhost" in _final_url or "code=" in _final_url:
+            _parsed = _up.urlparse(_final_url)
+            _params = dict(_up.parse_qsl(_parsed.query))
+            _code = _params.get("code", "")
+            if _code:
+                log("  ✅ 浏览器授权完成，已获取 authorization code")
+            else:
+                log("  ❌ 未从回调 URL 提取到 code")
+                if _own_browser and _browser:
+                    try: _browser.quit()
+                    except: pass
+                return None
+        else:
+            log("  ❌ 浏览器未进入回调")
+            if _own_browser and _browser:
+                try: _browser.quit()
+                except: pass
+            return None
+
+    except Exception as e:
+        log(f"  ❌ 浏览器 consent 异常: {e}")
+        import traceback
+        log(f"  {traceback.format_exc()}")
+        if _own_browser and _browser:
+            try: _browser.quit()
+            except: pass
+        return None
+    finally:
+        if _own_browser and _browser:
+            try: _browser.quit()
+            except: pass
+
+    # ------ HTTP 部分（token 交换，curl_cffi） ------
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    s = requests.Session()
+    if proxies:
+        s.proxies = proxies
+
+    token_data = _up.urlencode({
+        "grant_type": "authorization_code",
+        "code": _code,
+        "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID,
+        "code_verifier": verifier,
+    })
+    try:
+        r = s.post(
+            f"{OIDC_ISSUER}/oauth2/token",
+            data=token_data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": GROK_TOKEN_UA,
+                "X-Grok-Client-Version": GROK_VERSION,
+                "Accept": "*/*",
+            },
+            impersonate="chrome",
+            timeout=15,
+        )
+    except Exception as e:
+        log(f"  ❌ token 异常: {e}")
+        return None
+    if r.status_code < 200 or r.status_code >= 300:
+        log(f"  ❌ token HTTP {r.status_code}: {str(r.text)[:200]}")
+        return None
+    try:
+        token = r.json()
+    except Exception:
+        log(f"  ❌ token 返回非 JSON: {str(r.text)[:200]}")
+        return None
+    if not token.get("access_token"):
+        log(f"  ❌ token 缺少 access_token: {str(token)[:200]}")
+        return None
+    if not token.get("expires_in"):
+        token["expires_in"] = 21600
+    if not token.get("token_type"):
+        token["token_type"] = "Bearer"
+
+    ap = decode_jwt_payload(token["access_token"])
+    ref = ap.get("referrer")
+    if ref not in (GROK_REFERRER, "grok-build", "cli-proxy-api"):
+        log(f"  ⚠️ access_token referrer={ref!r}")
+    else:
+        log(f"  ✅ access_token referrer={ref!r}")
+    log(f"  ✅ access_token (expires_in={token.get('expires_in')}s)"
+        + (" + refresh_token" if token.get("refresh_token") else ""))
+    return token
 
 def token_to_auth_entry(token: dict, email: str = "") -> tuple[str, dict]:
     """
