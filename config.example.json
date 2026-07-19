@@ -8,7 +8,7 @@
   "cloudflare_path_accounts": "/api/new_address",
   "cloudflare_path_token": "/api/token",
   "cloudflare_path_messages": "/api/mails",
-  "proxy": "",
+  "proxy": "http://127.0.0.1:7890",
   "enable_nsfw": true,
   "register_count": 1,
   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -17,7 +17,7 @@
   "cpa_remote_url": "",
   "cpa_management_key": "",
   "defaultDomains": "example.com",
-  "email_provider": "cloudflare",
+  "email_provider": "yyds",
   "yyds_api_key": "",
   "yyds_jwt": ""
 }

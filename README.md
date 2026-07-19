@@ -179,16 +179,15 @@ python sso_to_auth_json.py --sso-cookie 'eyJ...' \
 
 `sso_list.txt`：一行一个 SSO，或 `邮箱----密码----sso`。
 
-### 为什么必须用授权码流程
-
-这是本项目区别于普通 SSO→token 脚本的关键，踩过坑后固化下来：
+### SSO → CPA：用 device flow（推荐，生产用）
 
 - **SSO 不能直接喂给 CPA。** CPA 走 OAuth，需要 `access_token` / `refresh_token`，SSO cookie 只是换 token 的入场券。
-- **必须带 `referrer=grok-build`。** xAI 后端要求 access_token 携带 `referrer=grok-build` claim，否则 grok build 通道（`cli-chat-proxy.grok.com`）拒绝，调用 chat 时报 `permission-denied / Access to the chat endpoint is denied`。早期用 device flow 换的 token **不带**这个 claim，会全部失效。
-- **解法：授权码流程（Authorization Code + PKCE）。** 在 `/oauth2/authorize` 和 consent 提交两处注入 `referrer=grok-build`，换出的 token 才带此 claim。程序换完会自动校验，日志显示 `access_token 已带 referrer=grok-build`。
-- **base_url 必须是 `cli-chat-proxy.grok.com/v1`。** 写入的 auth 记录 `base_url` 指向 grok build 免费通道；若为空，CPA 会回退到计费通道 `api.x.ai/v1`，同样触发 `permission-denied`。
+- **用 OAuth device flow**（`convert_device.py`）：`POST /oauth2/device/code`（带 sso cookie）拿 device_code + verification_uri_complete → 有头真实 Chrome 打开 → 点允许 → 轮询 `/oauth2/token` 换 token。详见 `SETUP.md` / `USAGE.md` / `HANDOFF_20260719.md`。
+- **旧的授权码流程（`convert_new4.py`）已废弃**：xAI 已对该 client_id 的 `redirect_uri=127.0.0.1` auth-code flow 降级，consent 页 "Allow" 点不动，会卡死。
+- **关于 `referrer=grok-build`**：早期文档说"必须带此 claim 否则失效"——经实测**不成立**。device flow 换出的 token 无论 referrer 是否为 `grok-build`，都能正常调 `cli-chat-proxy.grok.com` 的 chat 接口（model=`grok-4.5-build-free`）。chat 403 的真正原因是**账号无 Grok Build free 额度**（账号服务端状态，非 token claim），见 `CHAT_403_20260719.md`。
+- **base_url 用 `cli-chat-proxy.grok.com/v1`**（grok build 免费通道）；若为空会回退计费通道 `api.x.ai/v1`。
 
-如果 CPA 里已有旧的失效号（`base_url=api.x.ai/v1` 或 `referrer=None`），用本节的独立转换脚本以相同邮箱重新生成一遍覆盖即可（文件名按 `xai-<email>.json` 命名，会原地覆盖）。
+如果 CPA 里已有旧失效号，用 `convert_device.py` 以相同邮箱重新生成覆盖即可（文件名 `xai-<email>.json` 原地覆盖）。
 
 ## 运行
 
