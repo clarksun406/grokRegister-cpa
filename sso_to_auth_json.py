@@ -415,6 +415,7 @@ def sso_to_token_browser(
         }])]
 
         # 在浏览器中执行 fetch（有 Cloudflare cookie，不会被拦）
+        _escaped_body = _consent_payload[0].replace("'", "\\'")
         _result = _the_tab.run_js(f'''
             fetch('{_final_url}', {{
                 method: 'POST',
@@ -424,7 +425,7 @@ def sso_to_token_browser(
                     'Next-Action': '{NEXT_ACTION_ID}',
                     'Origin': 'https://accounts.x.ai',
                 }},
-                body: '{_consent_payload[0].replace("'", "\\'")}',
+                body: '{_escaped_body}',
                 redirect: 'manual'
             }})
             .then(r => {{

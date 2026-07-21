@@ -9,7 +9,7 @@
 | 操作系统 | Windows 10/11（脚本默认走 Windows 路径找 Chrome；Linux/macOS 需改 `convert_device.py` 的 Chrome 路径） |
 | Python | 3.9+（实测 3.13 可用） |
 | 代理 | Clash/Mihomo 开着，监听 `127.0.0.1:7890`，选**住宅 IP 节点**（机房 IP 易被 Cloudflare 拦） |
-| 浏览器 | **Google Chrome 装到默认路径**（`C:\Program Files\Google\Chrome\Application\chrome.exe`）——device flow 转换必须用真实 Chrome，headless/Playwright bundled Chromium 会被 CF block |
+| 浏览器 | **Google Chrome 装到默认路径**（`C:\Program Files\Google\Chrome\Application\chrome.exe`）——注册和 device flow 转换均依赖真实 Chrome |
 
 ## 1. clone + 虚拟环境 + 依赖
 
@@ -21,15 +21,7 @@ python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-## 2. 装 Playwright 浏览器（关键，文档常漏）
-
-`convert_device.py` 用 Playwright 驱动真实 Chrome，必须装一次：
-
-```bash
-.venv/Scripts/python.exe -m playwright install chromium
-```
-
-## 3. 配置 config.json
+## 2. 配置 config.json
 
 ```bash
 cp config.example.json config.json
@@ -50,18 +42,18 @@ cp config.example.json config.json
 > `yyds_api_key` 不入库（config.json 被 .gitignore 忽略），需自己申请。
 > 域名已内置白名单轮换（`215.singledog.net` / `91.txvlogvip.top` / `a.bdbdjx.top`），不用配。
 
-## 4. 跑通验证（注册 1 个 → 转 CPA → 测 chat）
+## 3. 跑通验证（注册 1 个 → 转 CPA → 测 chat）
 
 ```bash
-# 4.1 注册 1 个账号（交互式，输入 start）
+# 3.1 注册 1 个账号（交互式，输入 start）
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u grok_register_ttk.py cli
 #   输出 accounts/accounts_<日期>_<时间>.txt，每行 email----password----sso
 
-# 4.2 转 CPA（device flow，有头真实 Chrome，~10s/个）
-PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device.py --headless 0
+# 3.2 转 CPA（device flow + DrissionPage 真实 Chrome，~10s/个）
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device_dp.py
 #   输出 cpa_auth/xai-<email>.json
 
-# 4.3 测 chat 是否可用
+# 3.3 测 chat 是否可用
 .venv/Scripts/python.exe -c "
 import json,glob,requests
 d=json.load(open(sorted(glob.glob('cpa_auth/xai-*.json'))[-1],encoding='utf-8'))
@@ -75,7 +67,7 @@ print(r.status_code, r.text[:150])
 
 通过即环境就绪。
 
-## 5. 日常使用
+## 4. 日常使用
 
 见 `USAGE.md`，三个核心命令：
 
@@ -83,8 +75,8 @@ print(r.status_code, r.text[:150])
 # 注册（改 config.json 的 register_count 控制数量）
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u grok_register_ttk.py cli
 
-# 转 CPA（必须 --headless 0）
-PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device.py --headless 0
+# 转 CPA（DrissionPage 版，无需 --headless 参数）
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device_dp.py
 
 # 日常刷新（access_token 6h 过期，按需刷，~1s/个）
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u refresh_cpa.py
@@ -94,12 +86,12 @@ PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u refresh_cpa.py
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| `convert_device.py` 报 `Cloudflare 拦截 (blocked)` | 出口 IP 被 CF 标记，**换住宅节点**。`probe_auth.py` 不可信（测不出提交级拦截） |
+| `convert_device.py` 报 `Cloudflare 拦截 (blocked)` | Playwright 浏览器指纹被 CF 检测。**改用 `convert_device_dp.py`**（DrissionPage 驱动真实 Chrome，CF 无法检测自动化指纹）。若仍被封则换住宅节点 |
 | `ConnectionResetError 10054` / `SSL EOF` | 代理出口被高频打 reset，**冷却 60s 再跑**，不必换节点 |
-| `convert_device.py` headless 全 block | headless 必被 CF 拦，**必须 `--headless 0`** |
+| `convert_device_dp.py` 超时 / 页面不跳转 | 可能是 cookie 注入失败或页面渲染慢。检查 Chrome 路径是否正确，确保没用 headless |
 | 注册失败、撞乱七八糟子域 | 域名白名单已内置；若白名单全 403，回退打分轮换 |
 | chat 403 `permission-denied` | 账号无 Grok Build free 额度（07-17 23:42~07-18 注册的那批），换账号；新注册账号正常可用 |
-| refresh 报 `invalid_grant: revoked` | refresh_token 被 xAI 吊销，用 `convert_device.py` 重转可复活（sso 还在的话） |
+| refresh 报 `invalid_grant: revoked` | refresh_token 被 xAI 吊销，用 `convert_device_dp.py` 重转可复活（sso 还在的话） |
 
 ## 转移凭证到另一台电脑
 

@@ -23,19 +23,21 @@ PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u grok_register_ttk.py cli
 - 输出：`accounts/accounts_<日期>_<时间>.txt`，每行 `email----password----sso_cookie`
 - NSFW（`set_birth_date`）常被 grok.com CF 403，**不影响账号**，sso 照拿
 
-### 2. SSO → CPA（device flow，**生产用**）
+### 2. SSO → CPA（device flow + DrissionPage，**生产用**）
 
 ```bash
-# 转所有还没 CPA 的账号（推荐有头）
-PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device.py --headless 0
+# 转所有还没 CPA 的账号
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device_dp.py
 
 # 只转指定账号
-PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device.py --only <email> --headless 0
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device_dp.py --only <email>
 ```
-- **必须 `--headless 0`**，headless 必被 Cloudflare block
+- 用 DrissionPage 驱动真实 Chrome，**不会被 Cloudflare 检测为自动化**（Playwright 版 `convert_device.py` 会被 CF 指纹拦截）
 - 输出：`cpa_auth/xai-<email>.json`
-- 每个账号 ~8-13s（有头真实 Chrome）
+- 每个账号 ~8-13s
 - 自动扫 `accounts/` 子目录 + 根目录所有 `accounts_*.txt`，去重，只转没 CPA 的
+
+> 旧 `convert_device.py`（Playwright 版）保留作备用，但 CF 已能检测其自动化指纹，优先用 `convert_device_dp.py`。
 
 ### 3. 日常刷新 token（纯 HTTP，不走浏览器）
 
@@ -52,19 +54,19 @@ PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u refresh_cpa.py --force  # 强
 
 | 报错 | 处理 |
 |---|---|
-| `Cloudflare 拦截 (blocked)`（device flow 浏览器侧） | **换节点**（住宅 IP） |
+| `Cloudflare 拦截 (blocked)`（device flow 浏览器侧） | **改用 `convert_device_dp.py`**（DrissionPage 不会被 CF 检测）。若仍被拦则换住宅节点 |
 | `ConnectionResetError 10054` / `SSL EOF` / `Max retries exceeded`（refresh 或 device 请求侧） | **冷却 60s 再跑**，通常继续就成功 |
-| refresh `invalid_grant: Refresh token has been revoked` | sso 还在就能复活：删掉该 CPA 文件，`convert_device.py --only <email> --headless 0` 重转 |
+| refresh `invalid_grant: Refresh token has been revoked` | sso 还在就能复活：删掉该 CPA 文件，`convert_device_dp.py --only <email>` 重转 |
 | `probe_auth.py` 说"节点干净"但转换仍被 block | probe 不可信（只测 authorize 能否到达，测不出 device/consent 提交级拦截），以实际转换为 |
 
 ---
 
 ## 批量转换遇到 ConnectionReset 怎么办
 
-`convert_device.py` / `refresh_cpa.py --force` 批量跑时，代理出口被高频打 reset 是常态。**不要换节点**，直接：
+`convert_device_dp.py` / `refresh_cpa.py --force` 批量跑时，代理出口被高频打 reset 是常态。**不要换节点**，直接：
 ```bash
 sleep 60  # 冷却
-PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device.py --headless 0
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device_dp.py
 # 它会自动只转还没 CPA 的，已成功的跳过
 ```
 反复跑直到 `To convert: 0`。
@@ -80,7 +82,7 @@ xAI 会批量吊销早期账号的 refresh_token（`refresh_cpa.py` 报 `revoked
 # 删掉它们的 CPA 文件
 rm "cpa_auth/xai-<email>.json"
 # 重转
-PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device.py --headless 0
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device_dp.py
 ```
 
 实测 07-14 注册（5 天前）的 sso 仍有效，17 个被吊销账号全部复活。
@@ -92,7 +94,8 @@ PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u convert_device.py --headless 
 ```
 grokRegister-cpa/
 ├── grok_register_ttk.py   # 注册账号
-├── convert_device.py       # SSO→CPA（device flow，生产用）★
+├── convert_device_dp.py    # SSO→CPA（device flow + DrissionPage，生产用）★
+├── convert_device.py       # SSO→CPA（device flow + Playwright，备用）
 ├── refresh_cpa.py          # CPA 日常刷新
 ├── probe_auth.py           # 节点探针（仅参考，不可信）
 ├── probe_console.py        # 注入 sso 打开 console/grok 的诊断脚本
