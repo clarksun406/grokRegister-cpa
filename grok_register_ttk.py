@@ -164,6 +164,69 @@ def get_proxies():
     return {}
 
 
+_proxy_pool_cache = None
+
+
+def load_proxy_pool():
+    global _proxy_pool_cache
+    if _proxy_pool_cache is not None:
+        return _proxy_pool_cache
+    proxy_dir = str(config.get("proxy_dir", "") or "").strip()
+    pool = []
+    if proxy_dir:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), proxy_dir)
+        if os.path.isdir(base):
+            for fname in sorted(os.listdir(base)):
+                if fname.endswith(".txt"):
+                    fpath = os.path.join(base, fname)
+                    try:
+                        with open(fpath, encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line and line.startswith("http"):
+                                    pool.append(line)
+                    except Exception:
+                        pass
+    _proxy_pool_cache = pool
+    return pool
+
+
+def _test_proxy(proxy_url, timeout=10):
+    import urllib.request, urllib.error
+    try:
+        handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        opener = urllib.request.build_opener(handler)
+        req = urllib.request.Request("https://api.ipify.org?format=json")
+        with opener.open(req, timeout=timeout) as resp:
+            import json as _json
+            data = _json.loads(resp.read())
+            return data.get("ip", "")
+    except Exception:
+        return ""
+
+
+def rotate_proxy(log_callback=None):
+    pool = load_proxy_pool()
+    if not pool:
+        return
+    import random as _rnd
+    candidates = _rnd.sample(pool, min(10, len(pool)))
+    for chosen in candidates:
+        ip_part = chosen.split("@")[-1] if "@" in chosen else chosen
+        if log_callback:
+            log_callback(f"[*] 测试代理: {ip_part} ...")
+        result_ip = _test_proxy(chosen)
+        if result_ip:
+            config["proxy"] = chosen
+            if log_callback:
+                log_callback(f"[*] 代理可用: {result_ip} (池大小={len(pool)})")
+            return
+        if log_callback:
+            log_callback(f"[!] 代理不通，跳过: {ip_part}")
+    if log_callback:
+        log_callback("[!] 代理池测试 10 个均不可用，沿用当前代理")
+
+
 def get_duckmail_api_key():
     return config.get("duckmail_api_key", "")
 
@@ -399,7 +462,12 @@ def create_browser_options():
         options.add_extension(EXTENSION_PATH)
     proxy = str(config.get("proxy", "") or "").strip()
     if proxy:
-        options.set_proxy(proxy)
+        if "@" in proxy:
+            from local_proxy import start_local_proxy
+            port = start_local_proxy(proxy)
+            options.set_proxy(f"http://127.0.0.1:{port}")
+        else:
+            options.set_proxy(proxy)
     return options
 
 
@@ -3124,6 +3192,7 @@ def run_registration_cli(count):
     cli_log(f"[*] 终端模式启动，目标数量: {count}")
     cli_log(f"[*] 成功账号将实时保存到: {accounts_output_file}")
     try:
+        rotate_proxy(cli_log)
         start_browser(log_callback=cli_log)
         cli_log("[*] 浏览器已启动")
         i = 0
@@ -3238,6 +3307,7 @@ def run_registration_cli(count):
                 if controller.should_stop():
                     break
                 try:
+                    rotate_proxy(cli_log)
                     if browser is None:
                         start_browser(log_callback=cli_log)
                     else:

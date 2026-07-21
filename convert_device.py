@@ -21,6 +21,12 @@ consent 页的 "Allow" 经常点不动（xAI 实际期望 device flow）。
 import sys, os, json, time, argparse, base64, binascii
 from urllib.parse import urlparse, urlencode
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 import requests
 
 from xai_oauth import (
@@ -329,7 +335,12 @@ def confirm_in_browser(verification_url: str, sso: str, proxy: str, headless: bo
                     raise
                 except Exception:
                     page.wait_for_timeout(POLL_WAIT_MS)
-            raise RuntimeError(f"browser confirm 超时 ({timeout}s)，最后 url={page.url[:100]}")
+            # 循环结束后再检查一次 URL（防止竞态：页面刚好在 deadline 时跳到 done）
+            final_url = page.url
+            if "/oauth2/device/done" in final_url:
+                print(f"  [browser] ✓ device authorized (final check)", flush=True)
+                return
+            raise RuntimeError(f"browser confirm 超时 ({timeout}s)，最后 url={final_url[:100]}")
         finally:
             try:
                 browser.close()
